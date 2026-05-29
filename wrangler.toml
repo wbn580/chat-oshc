@@ -16,6 +16,7 @@ index_name = "kb-oshc"
 COHORTGO_PARTNER_CODE = "au-unilink"
 COHORTGO_REFERRER_ID = "0df195ef-7f4d-4faf-82e2-1878faa84597"
 COHORTGO_BASE_URL = "https://cohortflow.com/api/v1"
+FLYWIRE_REFERRER_UUID = "0df195ef-7f4d-4faf-82e2-1878faa84597"
 DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1"
 DASHSCOPE_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 DEFAULT_MODEL_CHAT = "deepseek-v4-pro"
@@ -28,6 +29,10 @@ EMBEDDING_MODEL = "text-embedding-v3"
 # DSPRO_API_KEY
 # DASHSCOPE_API_KEY
 # RESEND_API_KEY
+
+[[routes]]
+pattern = "chat.oshc.net"
+custom_domain = true
 
 [observability]
 enabled = true

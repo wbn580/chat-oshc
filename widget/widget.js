@@ -1,10 +1,16 @@
-// OSHC Olivia Widget — 前端 JS
-// 用法：<script src="https://chat.oshc.com.cn/widget.js"
-//        data-partner="au-unilink" data-site="oshc.com.cn" async></script>
+// OSHC Olivia Widget — 前端 JS (v2 Flywire Hybrid)
+// 用法：<script src="https://chat.oshc.net/widget.js"
+//        data-partner="au-unilink" data-site="oshc.net" async></script>
+//
+// v2 changes:
+//   - Only collects 5 fields (no 38-field form)
+//   - "立即购买" button → POST /click → gets Flywire referral URL
+//     → window.open(url, '_blank') in new tab
+//   - Removed purchase_url button-per-provider pattern
+//   - Calls POST /quote for 5-provider comparison
 //
 // 单文件 vanilla JS，IIFE 自启动。不依赖外部库。
 // 主题：医疗蓝 #0066CC，Olivia bot 头像
-// 复刻 arrivau-widget 模式：悬浮气泡 + 展开面板 + 归因 + session 持久化
 
 (function () {
   'use strict';
@@ -51,44 +57,28 @@
   const i18n = isZh ? {
     bubbleTitle: '在线咨询 Olivia',
     headerTitle: 'Olivia · OSHC 助手',
-    headerSubtitle: '5 家政府认可 OSHC 对比',
+    headerSubtitle: '6 家政府认可 OSHC 对比',
     placeholder: '输入消息，回车发送…',
     sendLabel: '发送',
     closeLabel: '关闭',
     typing: 'Olivia 正在输入…',
     privacy: '对话仅用于 OSHC 报价对比，遵守隐私政策',
     errorReply: '哎呀网络抽风了一下，能再试一次吗？或者直接告诉我签证类型和入学时间～',
-    greeting: null, // server sends first
+    buyNow: '立即购买',
+    greeting: null,
   } : {
     bubbleTitle: 'Chat with Olivia',
     headerTitle: 'Olivia · OSHC Assistant',
-    headerSubtitle: 'Compare 5 Govt-Approved OSHC',
+    headerSubtitle: 'Compare 6 Govt-Approved OSHC',
     placeholder: 'Type a message — press Enter…',
     sendLabel: 'Send',
     closeLabel: 'Close',
     typing: 'Olivia is typing…',
     privacy: 'Conversations for OSHC comparison only · privacy respected',
     errorReply: 'Network hiccup — please try again or share your visa type and dates.',
+    buyNow: 'Buy Now',
     greeting: null,
   };
-
-  // ============================================================
-  // 归因数据
-  // ============================================================
-  function captureAttribution() {
-    const url = new URL(window.location.href);
-    const params = url.searchParams;
-    return {
-      site_id: config.site,
-      lang: config.lang,
-      channel: config.channel,
-      page_url: window.location.href.slice(0, 500),
-      referrer: document.referrer?.slice(0, 500) || '',
-      utm_source: params.get('utm_source') || '',
-      utm_medium: params.get('utm_medium') || '',
-      utm_campaign: params.get('utm_campaign') || '',
-    };
-  }
 
   // ============================================================
   // 状态管理
@@ -98,6 +88,8 @@
     isOpen: false,
     isLoading: false,
     messages: JSON.parse(sessionStorage.getItem('olivia-widget-messages') || '[]'),
+    selectedProvider: null,  // v2: tracked for /click call
+    referralUrl: null,       // v2: cached from latest quote response
   };
 
   function saveState() {
@@ -212,7 +204,6 @@
   const closeBtns = panel.querySelectorAll('.ow-header-close');
   const bubbleIcon = bubble.querySelector('.ow-bubble-icon');
   const bubbleClose = bubble.querySelector('.ow-bubble-close');
-  const bubbleDot = bubble.querySelector('.ow-bubble-dot');
 
   // ============================================================
   // UI 交互
@@ -263,23 +254,34 @@
     const div = document.createElement('div');
     div.className = `ow-msg ${role}`;
 
-    // Simple markdown-like rendering
     let html = parseMarkdown(content);
     div.innerHTML = html;
 
-    // Action buttons
+    // Action buttons (v2: single "立即购买" + provider selectors)
     if (actions && actions.length > 0) {
       const actionsDiv = document.createElement('div');
       actionsDiv.className = 'ow-msg-actions';
       actions.forEach(a => {
-        const btn = document.createElement('a');
-        btn.className = `ow-btn ${a.type === 'primary' ? 'ow-btn-primary' : 'ow-btn-secondary'}`;
-        btn.textContent = a.label;
-        btn.href = a.url;
-        btn.target = '_blank';
-        btn.rel = 'noopener';
-        btn.addEventListener('click', () => recordClick(a.url));
-        actionsDiv.appendChild(btn);
+        if (a.type === 'buy-now') {
+          // v2: "立即购买" button → POST /click → redirect
+          const btn = document.createElement('button');
+          btn.className = 'ow-btn ow-btn-primary';
+          btn.textContent = a.label;
+          btn.addEventListener('click', () => handleBuyNow(a.provider));
+          actionsDiv.appendChild(btn);
+        } else if (a.type === 'select-provider') {
+          // Provider selection button
+          const btn = document.createElement('button');
+          btn.className = 'ow-btn ow-btn-secondary';
+          btn.textContent = a.label;
+          btn.addEventListener('click', () => {
+            state.selectedProvider = a.provider;
+            // Highlight selection
+            actionsDiv.querySelectorAll('.ow-btn-secondary').forEach(b => b.style.background = '#E8EEF5');
+            btn.style.background = '#C8D8F0';
+          });
+          actionsDiv.appendChild(btn);
+        }
       });
       div.appendChild(actionsDiv);
     }
@@ -289,14 +291,9 @@
   }
 
   function parseMarkdown(text) {
-    // Bold
     text = text.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
-    // Italic
     text = text.replace(/\*(.+?)\*/g, '<em>$1</em>');
-    // Ordered lists: preserve existing numbered items
-    // Links
     text = text.replace(/\[(.+?)\]\((.+?)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
-    // Line breaks
     text = text.replace(/\n/g, '<br>');
     return text;
   }
@@ -314,6 +311,50 @@
       typingEl.classList.remove('active');
     }
     scrollToBottom();
+  }
+
+  // ============================================================
+  // v2: "立即购买" → POST /click → get referral URL → redirect
+  // ============================================================
+  async function handleBuyNow(provider) {
+    if (!state.sessionId || state.isLoading) return;
+    state.isLoading = true;
+    setTyping(true);
+
+    try {
+      // POST /click to record the click + get referral URL
+      const resp = await fetch(`${config.apiBase}/click`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          session_id: state.sessionId,
+          target_provider: provider || state.selectedProvider || null,
+        }),
+      });
+
+      if (!resp.ok) throw new Error(`Click API ${resp.status}`);
+      const data = await resp.json();
+
+      setTyping(false);
+
+      if (data.referral_url) {
+        // Open Flywire landing in new tab
+        window.open(data.referral_url, '_blank', 'noopener,noreferrer');
+        addMessage('assistant',
+          isZh
+            ? '已为你打开购买页面！在新标签页中，你只需填写信息并支付，Flywire 会把保险证书直接发到你邮箱。如有任何问题，可以回到这里继续问我 👍'
+            : 'Purchase page opened! Fill in your details on the Flywire landing page and complete payment. The COE certificate will be emailed to you directly. Feel free to come back here if you have questions 👍'
+        );
+      } else {
+        addMessage('assistant', i18n.errorReply);
+      }
+    } catch (e) {
+      setTyping(false);
+      addMessage('assistant', i18n.errorReply);
+      console.error('[olivia-widget] buy-now failed', e);
+    }
+
+    state.isLoading = false;
   }
 
   // ============================================================
@@ -363,26 +404,42 @@
       setTyping(false);
       addMessage('assistant', data.reply);
 
-      // If quote is present, append it
+      // v2: If quote present, render with "立即购买" button
       if (data.quote && data.quote.quotes) {
+        // Cache referral URL
+        if (data.quote.referral_url) {
+          state.referralUrl = data.quote.referral_url;
+        }
+
         const quoteLines = data.quote.quotes.map(function(q, i) {
           return (i + 1) + '. **' + q.provider + '** — ' + q.premium_formatted;
         });
         const recommended = data.quote.recommended;
         let quoteText = quoteLines.join('\n');
         if (recommended) {
-          quoteText += `\n\n推荐 → **${recommended}**`;
-
-          // Add action buttons
-          const actions = data.quote.quotes.map(function(q) {
-            return {
-              label: q.provider === recommended ? '立即购买 ' + q.provider : '查看 ' + q.provider,
-              url: q.purchase_url,
-              type: q.provider === recommended ? 'primary' : 'secondary'
-            };
-          });
-          addMessage('assistant', quoteText, actions);
+          quoteText += '\n\n💡 推荐 → **' + recommended + '**';
         }
+
+        // v2: Provider selection buttons + single "立即购买" button
+        const actions = [];
+
+        // Provider selection buttons
+        data.quote.quotes.forEach(function(q) {
+          actions.push({
+            label: '选择 ' + q.provider,
+            provider: q.provider,
+            type: 'select-provider'
+          });
+        });
+
+        // Single "立即购买" button
+        actions.push({
+          label: isZh ? '立即购买 ' + (recommended || '') : 'Buy Now ' + (recommended || ''),
+          provider: recommended,
+          type: 'buy-now'
+        });
+
+        addMessage('assistant', quoteText, actions);
       }
     } catch (e) {
       setTyping(false);
@@ -391,17 +448,6 @@
     }
 
     state.isLoading = false;
-  }
-
-  async function recordClick(url) {
-    if (!state.sessionId) return;
-    try {
-      await fetch(`${config.apiBase}/click`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ session_id: state.sessionId, purchase_url: url }),
-      });
-    } catch { /* silent */ }
   }
 
   // ============================================================

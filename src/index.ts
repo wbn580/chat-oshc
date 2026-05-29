@@ -1,14 +1,14 @@
-// chat-oshc Worker — 主入口
-// Phase 3+4+5 routes：
+// chat-oshc Worker — 主入口 (v2 Flywire Hybrid)
+// v2 routes：
 //   GET  /health     — 健康检查
 //   GET  /widget.js  — 前端 widget JS
 //   POST /session    — 创建新 chatbot session + UUID
 //   POST /chat       — chatbot 对话主入口（含 RAG）
-//   POST /quote      — Cohort Go Quote API 调取
-//   POST /click      — 记录 purchase_url 点击
+//   POST /quote      — Cohort Go Quote API 调取（短期 fallback）
+//   POST /click      — v2: Flywire referral click 记录 + 返回 referral URL
 //   OPTIONS *        — CORS 预检
 
-import type { ChatRequest, ChatResponse, Env, HealthResponse, QuoteResult, SessionResponse } from './types';
+import type { ChatRequest, ChatResponse, ClickRequest, ClickResponse, Env, HealthResponse, QuoteResult, SessionResponse } from './types';
 import {
   allFieldsReady,
   appendMessage,
@@ -23,7 +23,8 @@ import {
 } from './db';
 import { chat, extractOshcFields } from './llm';
 import { retrieveKB } from './kb';
-import { appendCounselorKey, getQuote, pickRecommendation } from './cohortgo';
+import { getQuote, pickRecommendation } from './cohortgo';
+import { buildReferralUrl } from './api/flywire-referral';
 import { WIDGET_JS } from './widget-js';
 
 const CORS = {
@@ -81,7 +82,7 @@ export default {
         });
       }
 
-      // ─── POST /click ───
+      // ─── POST /click ─── v2: Flywire referral click + return referral URL
       if (url.pathname === '/click' && req.method === 'POST') {
         return handleClick(req, env);
       }
@@ -94,16 +95,34 @@ export default {
   },
 };
 
-// ─── POST /click — 记录 purchase_url 点击 ───
+// ─── POST /click — v2: 记录 Flywire referral 点击 + 返回 referral URL ───
 async function handleClick(req: Request, env: Env): Promise<Response> {
-  let body: { session_id?: string; purchase_url?: string } = {};
+  let body: ClickRequest = {};
   try { body = await req.json(); } catch { return json({ error: 'invalid json' }, 400); }
 
   if (!body.session_id) return json({ error: 'session_id required' }, 400);
 
+  const targetProvider = body.target_provider ?? null;
+
   try {
-    await recordClick(env.DB, body.session_id, body.purchase_url ?? '');
-    return json({ ok: true });
+    const referralUrl = buildReferralUrl(body.session_id, targetProvider ?? undefined);
+
+    // 写 D1：记录点击时间 + 目标 provider
+    const now = Math.floor(Date.now() / 1000);
+    await env.DB.prepare(
+      `UPDATE sessions
+       SET referral_clicked_at = ?,
+           referral_target_provider = ?,
+           utm_campaign = ?,
+           close_type = 'clicked_purchase',
+           updated_at = ?
+       WHERE id = ?`,
+    ).bind(now, targetProvider, body.session_id, now, body.session_id).run();
+
+    return json<ClickResponse>({
+      ok: true,
+      referral_url: referralUrl,
+    });
   } catch (e: any) {
     return json({ error: String(e.message) }, 500);
   }
@@ -167,7 +186,7 @@ async function handleChat(req: Request, env: Env, ctx: ExecutionContext): Promis
     });
   }
 
-  // KB 检索（Phase 1+2: placeholder，Phase 3: 接 RAG）
+  // KB 检索
   let kbContext = '';
   try { kbContext = await retrieveKB(env, body.message); } catch { /* ok */ }
 
@@ -192,7 +211,7 @@ async function handleChat(req: Request, env: Env, ctx: ExecutionContext): Promis
   // 异步抽取 OSHC 字段（不阻塞对话响应）
   ctx.waitUntil(extractAndSave(env, sessionId));
 
-  // 检查之前是否已有完整 5 字段（从历史抽取缓存）→ 触发 auto-quote
+  // 检查之前是否已有完整 5 字段 → 触发 auto-quote
   const session = await getSession(env.DB, sessionId);
   let quote: QuoteResult | undefined;
   if (session && allFieldsReady(session)) {
@@ -212,7 +231,7 @@ async function handleChat(req: Request, env: Env, ctx: ExecutionContext): Promis
   });
 }
 
-// ─── POST /quote — 手动调 quote API ───
+// ─── POST /quote — 手动调 quote API（Cohort Go GET-only fallback）───
 async function handleQuote(req: Request, env: Env): Promise<Response> {
   let body: {
     session_id?: string;
@@ -279,6 +298,10 @@ async function extractAndSave(env: Env, sessionId: string): Promise<void> {
 }
 
 // ─── 调 Cohort Go Quote API + 写 D1 + 返回结果 ───
+// v2: 不再拼接 purchase_url（删 appendCounselorKey）。
+//     Cohort Go purchase_url 指向 oshcaustralia.com.au 三重 attribution，
+//     违反 Maggie 邮件 "discontinue all transactions including any existing API integrations"。
+//     交易统一走 Flywire referral URL（widget POST /click → buildReferralUrl）。
 async function fetchQuoteForSession(
   env: Env,
   sessionId: string,
@@ -292,18 +315,15 @@ async function fetchQuoteForSession(
     finish: session.policy_finish ?? '',
   };
 
-  const rawQuotes = await getQuote(env, params);
-
-  // 附加 fw_counselor_key
-  const quotes = rawQuotes.map(q => ({
-    ...q,
-    purchase_url: appendCounselorKey(q.purchase_url, sessionId),
-  }));
+  const quotes = await getQuote(env, params);
 
   const recommended = pickRecommendation(quotes);
 
   // 写 D1
   await saveQuote(env.DB, sessionId, { params, quotes }, recommended);
 
-  return { params, quotes, recommended };
+  // v2: 拼接 Flywire referral URL（替代 Cohort Go purchase_url）
+  const referralUrl = buildReferralUrl(sessionId);
+
+  return { params, quotes, recommended, referral_url: referralUrl };
 }

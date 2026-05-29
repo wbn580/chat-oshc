@@ -1,4 +1,4 @@
-// chat-oshc Worker — D1 database operations
+// chat-oshc Worker — D1 database operations (v2 Flywire Hybrid)
 
 import type { MessageRow, OshcFields, SessionRow } from './types';
 

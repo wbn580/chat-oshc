@@ -1,4 +1,11 @@
 // chat-oshc Worker — Cohort Go Insurance Quote API integration
+//
+// @deprecated 2026-05-29 · v2 short-term quote fallback only
+//   POST endpoints removed per Maggie email 5/29 "discontinue all transactions"
+//   Now GET-only: getInsuranceQuotes() for quote.json read-only fallback
+//   TODO Phase 2: cut over to Flywire Insurance Quote API
+//   (https://agents.flywire.com/api/insurance-quotes?type=INSURANCE-OSHC)
+//   → then credentials_merge.py remove cohortgo_api_user
 
 import type { Env, QuoteParams, ProviderQuote } from './types';
 

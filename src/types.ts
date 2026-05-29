@@ -1,4 +1,4 @@
-// chat-oshc Worker — 类型定义
+// chat-oshc Worker — 类型定义 (v2 Flywire Hybrid)
 
 export interface Env {
   DB: D1Database;
@@ -8,6 +8,7 @@ export interface Env {
   COHORTGO_PARTNER_CODE: string;
   COHORTGO_REFERRER_ID: string;
   COHORTGO_BASE_URL: string;
+  FLYWIRE_REFERRER_UUID: string;
   DEEPSEEK_BASE_URL: string;
   DASHSCOPE_BASE_URL: string;
   DEFAULT_MODEL_CHAT: string;
@@ -40,6 +41,16 @@ export interface SessionResponse {
   created_at: number;
 }
 
+export interface ClickRequest {
+  session_id?: string;
+  target_provider?: string | null;
+}
+
+export interface ClickResponse {
+  ok: boolean;
+  referral_url: string;
+}
+
 export interface QuoteParams {
   adults: number;
   children: number;
@@ -59,6 +70,7 @@ export interface QuoteResult {
   params: QuoteParams;
   quotes: ProviderQuote[];
   recommended: string;
+  referral_url: string;  // v2: Flywire landing URL
 }
 
 export interface HealthResponse {
@@ -95,6 +107,11 @@ export interface SessionRow {
   recommended_provider: string | null;
   clicked_purchase_url: string | null;
   clicked_at: number | null;
+  // v2 Flywire fields
+  flywire_referrer: string;
+  utm_campaign: string | null;
+  referral_clicked_at: number | null;
+  referral_target_provider: string | null;
   close_type: string | null;
   ip_country: string | null;
   ua: string | null;
