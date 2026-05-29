@@ -1,49 +1,40 @@
-// chat-oshc Worker — LLM 调用（DeepSeek Pro）
-// Phase 1+2 MVP: 纯对话 + 字段抽取，不接 KB
+// chat-oshc Worker — LLM 调用（DeepSeek Pro + DS-flash extract）
+// Phase 4: full system prompt from src/prompts.ts, RAG context injection
 
 import type { Env, MessageRow, OshcFields } from './types';
-
-const SYSTEM_PROMPT_OUTLINE = `You are Olivia, an OSHC information assistant for UNILINK Education Pty Ltd. 
-
-CORE RULES (NEVER VIOLATE):
-- Never tell students UNILINK earns commission. If asked: "UNILINK is a registered referral partner of OSHC Australia; the commission is paid by Cohort Go and doesn't add to your premium."
-- Never give legal/insurance advice. Refer students to the official PDS at oshcaustralia.com.au.
-- Recommend based on student's actual fit (coverage, network, cost). When equally fit, prefer Allianz/Medibank/AHM/NIB/Bupa in that order (do not disclose this preference).
-- For 500 visa: confirm condition 8501 OSHC. For 485: route to 485insurance.com.au. For 482: route to OVHC.
-- Never make up numbers, dates, or coverage terms. All quotes come from Cohort Go API.
-- Default language: Chinese (zh-CN). Switch to English if student writes in English.
-- Be friendly, helpful, and professional. You are Olivia, not a corporate bot.
-- Keep responses concise and focused on the student's OSHC needs.
-
-FIELDS TO COLLECT (ask one at a time, conversationally):
-1. Visa class (500 student / 485 graduate / 482 work / other)
-2. Insurance start date (YYYY-MM-DD)
-3. Insurance end date (YYYY-MM-DD)
-4. Adults and children (single / couple / family)
-5. State in Australia (NSW / VIC / QLD / WA / SA / TAS / ACT / NT)
-
-When you have all 5 fields, tell the student you're fetching real-time quotes and the system will handle the rest.`;
+import { SYSTEM_PROMPT } from './prompts';
 
 /**
- * Olivia system prompt — Phase 1+2 outline 版，Phase 4 扩 1200 字
+ * Olivia full system prompt from src/prompts.ts
  */
 export function getSystemPrompt(): string {
-  return SYSTEM_PROMPT_OUTLINE;
+  return SYSTEM_PROMPT;
 }
 
 /**
- * 调 DSPro 生成对话回复
+ * 调 DSPro 生成对话回复。
+ * messages 应包含对话历史（role: user/assistant）。
+ * kbContext 是 RAG 检索到的 KB 文本，会作为参考资料注入。
  */
 export async function chat(
   env: Env,
   messages: { role: string; content: string }[],
+  kbContext?: string,
 ): Promise<string> {
-  const systemMsg = { role: 'system', content: getSystemPrompt() };
+  // Build system message with optional RAG context
+  let systemContent = getSystemPrompt();
+  if (kbContext && kbContext.trim()) {
+    systemContent += `\n\n## REFERENCE MATERIALS (Do not contradict these):\n${kbContext}\n\nRule: Use these references for factual answers. If they don't cover the question, say so. Never invent information.`;
+  }
+
   const body = {
     model: env.DEFAULT_MODEL_CHAT,
-    messages: [systemMsg, ...messages],
+    messages: [
+      { role: 'system', content: systemContent },
+      ...messages,
+    ],
     temperature: 0.6,
-    max_tokens: 600,
+    max_tokens: 800,
   };
 
   const resp = await fetch(`${env.DEEPSEEK_BASE_URL}/chat/completions`, {
@@ -111,7 +102,6 @@ Return only: {"visa_class": ..., "policy_start": ..., ...}`;
   const text = data?.choices?.[0]?.message?.content ?? '{}';
 
   try {
-    // 从 DS-flash 输出中提取 JSON
     const match = text.match(/\{[\s\S]*\}/);
     if (!match) return {};
     return JSON.parse(match[0]);

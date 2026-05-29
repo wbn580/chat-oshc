@@ -1,9 +1,11 @@
 // chat-oshc Worker — 主入口
-// Phase 1+2 MVP 路由：
+// Phase 3+4+5 routes：
 //   GET  /health     — 健康检查
+//   GET  /widget.js  — 前端 widget JS
 //   POST /session    — 创建新 chatbot session + UUID
-//   POST /chat       — chatbot 对话主入口
+//   POST /chat       — chatbot 对话主入口（含 RAG）
 //   POST /quote      — Cohort Go Quote API 调取
+//   POST /click      — 记录 purchase_url 点击
 //   OPTIONS *        — CORS 预检
 
 import type { ChatRequest, ChatResponse, Env, HealthResponse, QuoteResult, SessionResponse } from './types';
@@ -15,12 +17,14 @@ import {
   getSession,
   getSessionFields,
   loadMessages,
+  recordClick,
   saveQuote,
   updateSessionFields,
 } from './db';
 import { chat, extractOshcFields } from './llm';
 import { retrieveKB } from './kb';
 import { appendCounselorKey, getQuote, pickRecommendation } from './cohortgo';
+import { WIDGET_JS } from './widget-js';
 
 const CORS = {
   'Access-Control-Allow-Origin': '*',
@@ -69,6 +73,19 @@ export default {
         return handleQuote(req, env);
       }
 
+      // ─── GET /widget.js ───
+      if (url.pathname === '/widget.js' && req.method === 'GET') {
+        return new Response(WIDGET_JS, {
+          status: 200,
+          headers: { 'Content-Type': 'application/javascript; charset=utf-8', 'Cache-Control': 'public, max-age=3600', ...CORS },
+        });
+      }
+
+      // ─── POST /click ───
+      if (url.pathname === '/click' && req.method === 'POST') {
+        return handleClick(req, env);
+      }
+
       return new Response('not found', { status: 404, headers: CORS });
     } catch (e: any) {
       console.error('[worker] uncaught', e);
@@ -76,6 +93,21 @@ export default {
     }
   },
 };
+
+// ─── POST /click — 记录 purchase_url 点击 ───
+async function handleClick(req: Request, env: Env): Promise<Response> {
+  let body: { session_id?: string; purchase_url?: string } = {};
+  try { body = await req.json(); } catch { return json({ error: 'invalid json' }, 400); }
+
+  if (!body.session_id) return json({ error: 'session_id required' }, 400);
+
+  try {
+    await recordClick(env.DB, body.session_id, body.purchase_url ?? '');
+    return json({ ok: true });
+  } catch (e: any) {
+    return json({ error: String(e.message) }, 500);
+  }
+}
 
 // ─── POST /session — 创建新 session ───
 async function handleSession(req: Request, env: Env): Promise<Response> {
@@ -85,6 +117,14 @@ async function handleSession(req: Request, env: Env): Promise<Response> {
   const cf = (req as any).cf ?? {};
   const sessionId = genSessionId();
   await createSession(env.DB, sessionId, cf.country ?? 'unknown', req.headers.get('User-Agent') ?? '', body.lang ?? 'zh-CN');
+
+  // Also update site/channel if provided
+  if (body.site || body.channel) {
+    try {
+      await env.DB.prepare('UPDATE sessions SET site = COALESCE(?, site), channel = COALESCE(?, channel) WHERE id = ?')
+        .bind(body.site ?? null, body.channel ?? null, sessionId).run();
+    } catch { /* ok */ }
+  }
 
   return json<SessionResponse>({
     session_id: sessionId,
@@ -137,15 +177,10 @@ async function handleChat(req: Request, env: Env, ctx: ExecutionContext): Promis
   // 加载对话历史
   const history = await loadMessages(env.DB, sessionId, 30);
 
-  // 调 DSPro 生成回复
+  // 调 DSPro 生成回复（传 kbContext 让 system prompt 能引用 RAG 资料）
   let replyText: string;
   try {
-    // 如果有 KB context，作为用户消息的补充注入
-    const chatMessages = [...history];
-    if (kbContext) {
-      chatMessages.push({ role: 'system', content: `Relevant policy info: ${kbContext}` });
-    }
-    replyText = await chat(env, chatMessages);
+    replyText = await chat(env, history, kbContext);
   } catch (e: any) {
     console.error('[chat] LLM call failed', e);
     replyText = '哎呀这边网络有点问题，能稍后再试一次吗？或者直接告诉我你的签证类型和入学时间，我帮你先查报价～';

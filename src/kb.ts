@@ -1,22 +1,38 @@
-// chat-oshc Worker — Vectorize KB (Phase 1+2 placeholder)
-// Phase 3: 灌 5 家 PDS + 30 FAQ → RAG 接入 chatbot
+// chat-oshc Worker — Vectorize KB (Phase 3 RAG implementation)
+// KB retrieval: embed query → query Vectorize → format results as context
 
 import type { Env } from './types';
 
 /**
- * Phase 1+2: no-op, returns empty context.
- * Phase 3: 调 DashScope embedding → Vectorize query → 返回 top-K chunk text
+ * Main RAG entry: get KB context for a user message.
+ * Returns formatted context string of top-K chunks, or empty string.
  */
 export async function retrieveKB(
-  _env: Env,
-  _query: string,
+  env: Env,
+  query: string,
+  topK: number = 5,
 ): Promise<string> {
-  // TODO Phase 3: implement RAG
-  return '';
+  if (!query || query.trim().length < 3) return '';
+
+  try {
+    // 1. Embed the user query
+    const vector = await getEmbedding(env, query);
+    if (!vector || vector.length === 0) return '';
+
+    // 2. Query Vectorize for top-K matches
+    const matches = await queryVectorize(env, vector, topK);
+    if (!matches || matches.length === 0) return '';
+
+    // 3. Format results as RAG context
+    return formatRagContext(matches);
+  } catch (e) {
+    console.error('[kb] retrieveKB failed', e);
+    return '';
+  }
 }
 
 /**
- * Query Vectorize index with embedding vector
+ * Query Vectorize index with embedding vector.
  */
 export async function queryVectorize(
   env: Env,
@@ -25,7 +41,7 @@ export async function queryVectorize(
 ): Promise<VectorizeMatch[]> {
   try {
     const results = await env.KB.query(vector, { topK, returnMetadata: true });
-    return results.matches;
+    return results.matches ?? [];
   } catch (e) {
     console.error('[kb] Vectorize query failed', e);
     return [];
@@ -33,7 +49,7 @@ export async function queryVectorize(
 }
 
 /**
- * Call DashScope text-embedding-v3 to get embedding vector
+ * Call DashScope text-embedding-v3 to get embedding vector.
  */
 export async function getEmbedding(
   env: Env,
@@ -58,3 +74,30 @@ export async function getEmbedding(
   const data = (await resp.json()) as any;
   return data?.data?.[0]?.embedding ?? [];
 }
+
+/**
+ * Format Vectorize matches into RAG context string for injection into system prompt.
+ * Each match: {id, score, metadata: {provider, doc_type, source, year, lang}}
+ */
+function formatRagContext(matches: VectorizeMatch[]): string {
+  const parts: string[] = [];
+
+  for (const m of matches) {
+    const meta = (m.metadata ?? {}) as Record<string, string>;
+    const provider = meta.provider ?? 'unknown';
+    const docType = meta.doc_type ?? 'unknown';
+    const source = meta.source ?? 'unknown';
+
+    // Build a compact reference line per chunk
+    parts.push(`[Source: ${provider} ${docType}, ref: ${source}] ${m.text ?? ''}`);
+  }
+
+  return parts.join('\n\n');
+}
+
+type VectorizeMatch = {
+  id: string;
+  score: number;
+  text?: string;
+  metadata?: Record<string, string>;
+};
